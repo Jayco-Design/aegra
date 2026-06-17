@@ -442,6 +442,48 @@ class TestRestoreTraceContext:
         assert "original_request_id" not in metadata
         assert set(metadata.keys()) == {"run_id", "thread_id", "graph_id"}
 
+    def test_clears_active_span_so_run_gets_fresh_root_seeded_with_run_id(self) -> None:
+        """A span active in the worker's context at job pickup must be cleared
+        before the run starts. Only root spans consult RunIdAwareIdGenerator,
+        so a leftover active span would make the run's first span a child that
+        inherits a foreign trace_id, silently dropping the run_id seed. The
+        inline path (make_run_trace_context) already clears it; this is the
+        regression test for the worker path doing the same.
+        """
+        import contextvars
+        import uuid as _uuid
+
+        from opentelemetry import context as otel_context
+        from opentelemetry import trace as otel_trace
+        from opentelemetry.sdk.trace import TracerProvider
+
+        from aegra_api.observability.span_enrichment import RunIdAwareIdGenerator
+
+        run_id = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+        tracer = TracerProvider(id_generator=RunIdAwareIdGenerator()).get_tracer("test")
+        job = _make_run_job()
+
+        def scenario() -> None:
+            # Simulate a stale span left active in the worker's context.
+            stale = tracer.start_span("stale-worker-span")
+            otel_context.attach(otel_trace.set_span_in_context(stale))
+            assert otel_trace.get_current_span().get_span_context().is_valid
+
+            with patch(f"{MODULE}.set_trace_context"):
+                _restore_trace_context(run_id, job, {"correlation_id": "req-abc"})
+
+            # The stale span is gone, so the run's first span is a fresh root...
+            assert not otel_trace.get_current_span().get_span_context().is_valid
+            run_span = tracer.start_span("run-root")
+            sc = run_span.get_span_context()
+            assert sc.trace_id == _uuid.UUID(run_id).int
+            # ...and its hex trace_id equals run_id with hyphens stripped — the
+            # spike's pass criterion.
+            assert format(sc.trace_id, "032x") == run_id.replace("-", "")
+
+        # Isolate the attach/seed mutations from other tests' OTEL context.
+        contextvars.copy_context().run(scenario)
+
 
 # ------------------------------------------------------------------
 # WorkerExecutor.submit

@@ -18,6 +18,8 @@ from datetime import UTC, datetime, timedelta
 
 import structlog
 from asgi_correlation_id import correlation_id
+from opentelemetry import context as otel_context
+from opentelemetry import trace as otel_trace
 from redis import RedisError
 from redis import TimeoutError as RedisTimeoutError
 from sqlalchemy import select, update
@@ -481,6 +483,13 @@ def _restore_trace_context(run_id: str, job: RunJob, trace: dict[str, str]) -> N
     if original_request_id:
         correlation_id.set(original_request_id)
 
+    # Clear any active span left in the worker's context so the run's first
+    # span becomes a fresh root. Only root spans hit RunIdAwareIdGenerator;
+    # if a stale span is active at pickup, the first span inherits its
+    # trace_id and the seeded run_id is silently dropped. Mirrors the
+    # inline path in make_run_trace_context. (otel_trace, not the `trace`
+    # param, which shadows the module here.)
+    otel_context.attach(otel_trace.set_span_in_context(otel_trace.INVALID_SPAN))
     seed_otel_trace_id(run_id)
     system_metadata: dict[str, str | int | float | bool] = {
         "run_id": run_id,
