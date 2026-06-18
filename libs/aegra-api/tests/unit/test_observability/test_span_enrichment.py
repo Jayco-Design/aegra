@@ -544,7 +544,7 @@ class TestSpanEnrichmentEndToEnd:
         carry its own context — no server-side join from trace to children.
         """
         ctx = make_run_trace_context(
-            run_id="run-1",
+            run_id=self._RUN_ID,
             thread_id="thread-1",
             graph_id="my_graph",
             user_identity="user-1",
@@ -566,4 +566,4 @@ class TestSpanEnrichmentEndToEnd:
             assert attrs["langfuse.user.id"] == "user-1"
             assert attrs["langfuse.session.id"] == "thread-1"
             assert attrs["langfuse.trace.name"] == "my_graph"
-            assert attrs["langfuse.trace.metadata.run_id"] == "run-1"
+            assert attrs["langfuse.trace.metadata.run_id"] == self._RUN_ID
