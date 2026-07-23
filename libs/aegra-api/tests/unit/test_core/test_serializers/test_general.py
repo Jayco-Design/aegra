@@ -203,7 +203,11 @@ class TestGeneralSerializer:
         without a dedicated branch it collapses to a repr string on the wire,
         and stream consumers (e.g. @ag-ui/langgraph's on_tool_end handler, which
         reads output.update.messages) can't recover the tool result — they read
-        an undefined tool_call_id off a string and emit an invalid event."""
+        an undefined tool_call_id off a string and emit an invalid event.
+
+        All four dataclass fields are emitted (graph/update/resume/goto), matching
+        orjson's native dataclass output on LangGraph Platform so consumers read
+        the Command byte-for-byte as they do there."""
         command = Command(
             update={
                 "todos": [{"content": "Look up customer", "status": "in_progress"}],
@@ -220,12 +224,23 @@ class TestGeneralSerializer:
         result = self.serializer.serialize(command)
 
         assert isinstance(result, dict), "Command must not fall back to str()"
-        assert "update" in result
+        assert set(result) == {"graph", "update", "resume", "goto"}, "all fields emitted (Platform parity)"
+        assert result["graph"] is None
+        assert result["resume"] is None
+        assert result["goto"] == []  # unset goto defaults to () → []
         message = result["update"]["messages"][0]
         assert message["type"] == "tool"
         assert message["tool_call_id"] == "call_abc"
         assert message["name"] == "write_todos"
         assert result["update"]["todos"][0]["status"] == "in_progress"
+
+    def test_serialize_command_preserves_falsy_resume(self):
+        """A falsy resume value (False/0/"") is a legitimate resume payload and
+        must survive serialization. Emitting all fields preserves it; a truthy
+        filter (``if getattr(obj, name)``) would silently drop it."""
+        assert self.serializer.serialize(Command(resume=False))["resume"] is False
+        assert self.serializer.serialize(Command(resume=0))["resume"] == 0
+        assert self.serializer.serialize(Command(resume=""))["resume"] == ""
 
     def test_serialize_pydantic_model_with_nested_data(self):
         """Test serialization of Pydantic model with nested structures"""
