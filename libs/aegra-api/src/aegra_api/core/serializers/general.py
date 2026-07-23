@@ -1,5 +1,6 @@
 """General-purpose object serialization for complex objects"""
 
+import dataclasses
 import inspect
 from typing import Any
 
@@ -36,6 +37,20 @@ class GeneralSerializer(Serializer):
         # Handle LangGraph Interrupt objects (they don't have .dict() method)
         elif obj.__class__.__name__ == "Interrupt" and hasattr(obj, "value") and hasattr(obj, "id"):
             return {"value": self._serialize_object(obj.value), "id": obj.id}
+
+        # Handle LangGraph Command objects (returned by state-updating tools such
+        # as write_todos). Command is a dataclass with no model_dump/.dict()/
+        # _asdict, so without this it hits the str() fallback and collapses to a
+        # repr string — which stream consumers can't parse (e.g. @ag-ui/langgraph's
+        # on_tool_end handler reads output.update.messages). Serialize its fields
+        # structurally; values recurse, so a ToolMessage inside update becomes its
+        # model_dump (with type="tool").
+        elif obj.__class__.__name__ == "Command" and dataclasses.is_dataclass(obj):
+            return {
+                field.name: self._serialize_object(getattr(obj, field.name))
+                for field in dataclasses.fields(obj)
+                if getattr(obj, field.name) is not None
+            }
 
         # Handle NamedTuples (like PregelTask) - they have _asdict() method
         elif hasattr(obj, "_asdict") and callable(obj._asdict):
