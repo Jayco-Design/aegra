@@ -3,6 +3,8 @@
 from collections import namedtuple
 
 import pytest
+from langchain_core.messages import ToolMessage
+from langgraph.types import Command
 from pydantic import BaseModel
 
 from aegra_api.core.serializers.base import SerializationError
@@ -193,6 +195,37 @@ class TestGeneralSerializer:
 
         assert isinstance(result, str)
         assert "CustomObject" in result
+
+    def test_serialize_command_structurally(self):
+        """A LangGraph Command (returned by state-updating tools like
+        write_todos) must serialize to its structural dict, NOT the str()
+        fallback. Command is a dataclass with no model_dump/.dict()/_asdict, so
+        without a dedicated branch it collapses to a repr string on the wire,
+        and stream consumers (e.g. @ag-ui/langgraph's on_tool_end handler, which
+        reads output.update.messages) can't recover the tool result — they read
+        an undefined tool_call_id off a string and emit an invalid event."""
+        command = Command(
+            update={
+                "todos": [{"content": "Look up customer", "status": "in_progress"}],
+                "messages": [
+                    ToolMessage(
+                        "Updated todo list",
+                        tool_call_id="call_abc",
+                        name="write_todos",
+                        id="msg_1",
+                    )
+                ],
+            }
+        )
+        result = self.serializer.serialize(command)
+
+        assert isinstance(result, dict), "Command must not fall back to str()"
+        assert "update" in result
+        message = result["update"]["messages"][0]
+        assert message["type"] == "tool"
+        assert message["tool_call_id"] == "call_abc"
+        assert message["name"] == "write_todos"
+        assert result["update"]["todos"][0]["status"] == "in_progress"
 
     def test_serialize_pydantic_model_with_nested_data(self):
         """Test serialization of Pydantic model with nested structures"""
