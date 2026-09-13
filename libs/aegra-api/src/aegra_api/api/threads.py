@@ -11,6 +11,7 @@ from uuid import uuid4
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.active_runs import active_runs
@@ -210,7 +211,23 @@ async def create_thread(
     )
 
     session.add(thread_orm)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError:
+        # Two requests for the same not-yet-existing thread_id can both pass
+        # the existence check above and race here; the unique constraint is
+        # the real source of truth. Resolve like the check above would have,
+        # instead of surfacing the raw IntegrityError.
+        await session.rollback()
+        existing = await session.scalar(
+            select(ThreadORM).where(
+                ThreadORM.thread_id == thread_id,
+                ThreadORM.user_id == user.identity,
+            )
+        )
+        if existing and request.if_exists == "do_nothing":
+            return _serialize_thread(existing)
+        raise HTTPException(409, f"Thread '{thread_id}' already exists") from None
 
     with contextlib.suppress(Exception):
         await session.refresh(thread_orm)

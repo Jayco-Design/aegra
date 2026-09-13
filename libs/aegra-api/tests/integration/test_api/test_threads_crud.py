@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 from fastapi.testclient import TestClient
 from langgraph.types import StateSnapshot
+from sqlalchemy.exc import IntegrityError
 
 from aegra_api.core.orm import get_session as core_get_session
 from tests.fixtures.clients import create_test_app, make_client
@@ -238,6 +239,61 @@ class TestCreateThread:
             "/threads",
             json={"threadId": "conflict-thread-id", "ifExists": "raise"},
         )
+        assert resp.status_code == 409
+        assert "already exists" in resp.json()["detail"]
+
+    def test_create_thread_race_returns_existing_with_do_nothing(self):
+        """Two concurrent creates for the same not-yet-existing thread_id both
+        pass the existence check; the loser's commit hits the unique
+        constraint. With ifExists='do_nothing' it should resolve to the
+        winner's row instead of raising the raw IntegrityError."""
+        app = create_test_app(include_runs=False, include_threads=True)
+        winner_thread = _thread_row("race-thread-id", metadata={"winner": True})
+
+        class Session(DummySessionBase):
+            scalar_call_count = 0
+
+            async def scalar(self, _stmt):
+                Session.scalar_call_count += 1
+                if Session.scalar_call_count == 1:
+                    return None  # initial existence check: not found yet
+                return winner_thread  # re-check after conflict: winner committed
+
+            async def commit(self):
+                raise IntegrityError("insert", {}, Exception("duplicate key"))
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = make_client(app)
+
+        resp = client.post(
+            "/threads",
+            json={"threadId": "race-thread-id", "ifExists": "do_nothing"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["metadata"].get("winner") is True
+
+    def test_create_thread_race_raises_409_without_do_nothing(self):
+        """Same race, default ifExists='raise': the loser gets a handled 409,
+        not a raw IntegrityError."""
+        app = create_test_app(include_runs=False, include_threads=True)
+        winner_thread = _thread_row("race-thread-id-2")
+
+        class Session(DummySessionBase):
+            scalar_call_count = 0
+
+            async def scalar(self, _stmt):
+                Session.scalar_call_count += 1
+                if Session.scalar_call_count == 1:
+                    return None
+                return winner_thread
+
+            async def commit(self):
+                raise IntegrityError("insert", {}, Exception("duplicate key"))
+
+        app.dependency_overrides[core_get_session] = override_get_session_dep(Session)
+        client = make_client(app)
+
+        resp = client.post("/threads", json={"threadId": "race-thread-id-2"})
         assert resp.status_code == 409
         assert "already exists" in resp.json()["detail"]
 
