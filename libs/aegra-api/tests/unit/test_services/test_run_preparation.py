@@ -5,9 +5,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy.exc import IntegrityError
 
 from aegra_api.services import run_preparation as mod
-from aegra_api.services.run_preparation import _validate_resume_command
+from aegra_api.services.run_preparation import _validate_resume_command, update_thread_metadata
 
 
 @pytest.fixture(autouse=True)
@@ -76,3 +77,60 @@ class TestValidateResumeCommand:
         session = _session_returning(_thread("idle"))
         await _validate_resume_command(session, "t1", None)
         session.scalar.assert_not_awaited()
+
+
+def _session_for_auto_create(*, raise_on_flush: bool = False) -> AsyncMock:
+    """A session with no existing thread, ready to auto-create one.
+
+    Mimics SQLAlchemy's begin_nested() savepoint contract precisely: flush()
+    inside the `async with` block either succeeds or raises, and the context
+    manager propagates that exception on exit (it never swallows it) — same
+    as a real SAVEPOINT rollback.
+    """
+    session = AsyncMock()
+    session.scalar = AsyncMock(return_value=None)
+    session.add = MagicMock()
+    session.expunge = MagicMock()
+
+    async def flush() -> None:
+        if raise_on_flush:
+            raise IntegrityError("insert", {}, Exception("duplicate key"))
+
+    session.flush = AsyncMock(side_effect=flush)
+
+    nested = MagicMock()
+    nested.__aenter__ = AsyncMock(return_value=nested)
+    nested.__aexit__ = AsyncMock(return_value=False)
+    session.begin_nested = MagicMock(return_value=nested)
+    return session
+
+
+class TestUpdateThreadMetadataAutoCreateRace:
+    """_prepare_run calls this for every run-start endpoint (create/stream/
+    wait) to auto-create a thread that wasn't explicitly POSTed first — the
+    same check-then-insert shape as api/threads.py's create_thread, and the
+    same race: two concurrent run-starts for a brand-new thread_id can both
+    pass the `not thread` check above and both attempt the insert."""
+
+    async def test_creates_the_thread_when_none_exists(self) -> None:
+        session = _session_for_auto_create()
+        await update_thread_metadata(session, "t1", "a1", "g1", user_id="u1")
+        session.add.assert_called_once()
+        session.expunge.assert_not_called()
+
+    async def test_losing_the_race_is_swallowed_not_raised(self) -> None:
+        """The loser's insert conflicts with the winner's already-committed
+        row (Postgres only raises a unique violation once the other
+        transaction has concluded) — so it's safe to drop the loser's
+        attempt and let the caller's later writes target the winner's row."""
+        session = _session_for_auto_create(raise_on_flush=True)
+        await update_thread_metadata(session, "t1", "a1", "g1", user_id="u1")
+        session.expunge.assert_called_once()
+
+    async def test_race_is_isolated_to_its_own_savepoint(self) -> None:
+        """The failing insert must not touch the caller's outer transaction —
+        confirmed by going through begin_nested(), not a bare flush/commit."""
+        session = _session_for_auto_create(raise_on_flush=True)
+        await update_thread_metadata(session, "t1", "a1", "g1", user_id="u1")
+        session.begin_nested.assert_called_once()
+        session.commit.assert_not_awaited()

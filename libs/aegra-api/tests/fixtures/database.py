@@ -26,6 +26,22 @@ class DummySessionBase:
     async def rollback(self):
         return None
 
+    async def flush(self):
+        return None
+
+    def begin_nested(self):
+        class _NestedTransaction:
+            async def __aenter__(self_inner):
+                return self_inner
+
+            async def __aexit__(self_inner, exc_type, exc, tb):
+                return False
+
+        return _NestedTransaction()
+
+    def expunge(self, _obj):
+        return None
+
     async def refresh(self, _obj):
         return None
 

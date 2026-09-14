@@ -13,6 +13,7 @@ import structlog
 from asgi_correlation_id import correlation_id
 from fastapi import HTTPException
 from sqlalchemy import or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from aegra_api.core.orm import Assistant as AssistantORM
@@ -169,6 +170,18 @@ async def update_thread_metadata(
             user_id=user_id,
         )
         session.add(thread_orm)
+        try:
+            # Isolated in its own SAVEPOINT: a concurrent auto-create for the
+            # same thread_id must not fail the caller's outer transaction,
+            # which still has the run record left to persist. For a unique
+            # violation to reach us here, the winning insert has already
+            # committed (Postgres blocks a conflicting insert until the
+            # other transaction concludes) — so the caller's subsequent
+            # writes to this thread_id will find it.
+            async with session.begin_nested():
+                await session.flush()
+        except IntegrityError:
+            session.expunge(thread_orm)
         return
 
     md = dict(getattr(thread, "metadata_json", {}) or {})
