@@ -4,6 +4,12 @@ from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator
 from typing import Any
 
+from aegra_api.models.enums import RunCancellationAction
+
+# How long a finished run's events stay replayable, both backends. Reconnects
+# happen in seconds; this is the documented window in docs/guides/streaming.mdx.
+REPLAY_RETENTION_SECONDS = 600
+
 
 class BaseRunBroker(ABC):
     """Abstract base class for a run-specific event broker.
@@ -75,12 +81,19 @@ class BaseBrokerManager(ABC):
         """Stop background tasks and release resources"""
 
     @abstractmethod
-    async def request_cancel(self, run_id: str, action: str = "cancel") -> None:
+    async def request_cancel(
+        self,
+        run_id: str,
+        action: RunCancellationAction = "cancel",
+        *,
+        emit_end_event: bool = True,
+    ) -> None:
         """Request cancellation of a run.
 
         In single-instance mode, cancels the local asyncio task directly.
         In multi-instance mode, broadcasts via Redis pub/sub so the owning
-        instance can act on it.
+        instance can act on it. ``emit_end_event`` is disabled when the API
+        has already reconciled the database and owns terminal signaling.
         """
 
     @abstractmethod
