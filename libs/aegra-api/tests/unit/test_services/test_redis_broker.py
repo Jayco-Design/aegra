@@ -8,12 +8,16 @@ import pytest
 from redis.exceptions import ConnectionError as RedisConnectionError
 
 from aegra_api.services.redis_broker import (
+    _COMPRESSION_PREFIX,
     _PUT_MAX_ATTEMPTS,
     RedisBrokerManager,
     RedisRunBroker,
+    _decompress,
     _deserialize_payload,
+    _maybe_compress,
     _serialize_payload,
 )
+from aegra_api.settings import settings
 
 
 class TestSerializationHelpers:
@@ -751,3 +755,81 @@ class TestRedisBrokerManager:
 
             await manager.stop()
             assert manager._running is False
+
+
+class TestReplayCompression:
+    """Compression of replay-buffer entries (REDIS_REPLAY_COMPRESSION)."""
+
+    # Over the size threshold and highly compressible, so gzip is a clear win —
+    # mirrors a large "values" state snapshot, which is what this targets.
+    _BIG_MESSAGE = json.dumps({"event_id": "evt-1", "payload": ["values", {"messages": [{"content": "spam " * 500}]}]})
+
+    def _make_broker(self) -> RedisRunBroker:
+        return RedisRunBroker(
+            "run-123",
+            "aegra:run:run-123",
+            "aegra:run:cache:run-123",
+            "aegra:run:counter:run-123",
+        )
+
+    def test_maybe_compress_passthrough_when_disabled(self) -> None:
+        with patch.object(settings.redis, "REDIS_REPLAY_COMPRESSION", False):
+            assert _maybe_compress(self._BIG_MESSAGE) == self._BIG_MESSAGE
+
+    def test_maybe_compress_passthrough_below_threshold(self) -> None:
+        small = json.dumps({"event_id": "e", "payload": ["values", {"a": 1}]})
+        with patch.object(settings.redis, "REDIS_REPLAY_COMPRESSION", True):
+            assert _maybe_compress(small) == small
+
+    def test_maybe_compress_roundtrips_and_shrinks(self) -> None:
+        with patch.object(settings.redis, "REDIS_REPLAY_COMPRESSION", True):
+            packed = _maybe_compress(self._BIG_MESSAGE)
+        assert packed.startswith(_COMPRESSION_PREFIX)
+        assert len(packed) < len(self._BIG_MESSAGE)  # genuinely smaller
+        assert _decompress(packed) == self._BIG_MESSAGE  # lossless round-trip
+
+    def test_decompress_passes_plain_json_through(self) -> None:
+        # The rollout guarantee: a reader on this version still decodes an
+        # uncompressed entry written by the previous version.
+        plain = json.dumps({"event_id": "evt-1", "payload": ["values", {"a": 1}]})
+        assert _decompress(plain) == plain
+
+    @pytest.mark.asyncio
+    async def test_replay_decodes_compressed_entries(self) -> None:
+        broker = self._make_broker()
+        with patch.object(settings.redis, "REDIS_REPLAY_COMPRESSION", True):
+            entry = _maybe_compress(json.dumps({"event_id": "evt-1", "payload": ["values", {"big": "x" * 2000}]}))
+        assert entry.startswith(_COMPRESSION_PREFIX)  # guard: the row really is compressed
+        mock_client = AsyncMock()
+        mock_client.lrange.return_value = [entry]
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+            events = await broker.replay(None)
+
+        assert events == [("evt-1", ("values", {"big": "x" * 2000}))]
+
+    @pytest.mark.asyncio
+    async def test_cache_stores_compressed_but_publish_stays_plain(self) -> None:
+        broker = self._make_broker()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock()
+        mock_client = MagicMock()
+        mock_client.publish = AsyncMock()
+        mock_client.pipeline.return_value = mock_pipe
+
+        big_payload = ("values", {"messages": [{"content": "spam " * 500}]})
+        with (
+            patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
+            patch.object(settings.redis, "REDIS_REPLAY_COMPRESSION", True),
+        ):
+            mock_rm.get_client.return_value = mock_client
+            await broker.put("evt-1", big_payload)
+
+        # The stored (RPUSH'd) replay entry is compressed...
+        _, stored = mock_pipe.rpush.call_args[0]
+        assert stored.startswith(_COMPRESSION_PREFIX)
+        # ...but the live PUBLISH payload stays plain JSON (transient, no memory cost).
+        _, published = mock_client.publish.call_args[0]
+        assert not published.startswith(_COMPRESSION_PREFIX)
+        assert json.loads(published)["event_id"] == "evt-1"
