@@ -9,7 +9,9 @@ access (instead of deriving from the replay buffer with O(N) LRANGE).
 """
 
 import asyncio
+import base64
 import contextlib
+import gzip
 import json
 import random
 import time
@@ -48,6 +50,16 @@ _BACKOFF_FACTOR = 2.0
 # event — a dropped event is a permanently lost SSE token.
 _PUT_MAX_ATTEMPTS = 3
 
+# Replay-buffer entries are gzipped when settings.redis.REDIS_REPLAY_COMPRESSION
+# is on and the entry is at least this many bytes. Below it, gzip + base64
+# framing would cost more than it saves (a token delta is a few hundred bytes),
+# so small events stay plain — the win is on large "values" state snapshots.
+_COMPRESSION_MIN_BYTES = 1024
+# Marks a compressed entry. A plain entry is always a JSON object ("{...}"), so
+# this prefix can never collide with one — which is what lets a reader tell the
+# two apart without a flag and decode either format.
+_COMPRESSION_PREFIX = "gz:"
+
 
 def _serialize_payload(payload: Any) -> str:
     """Serialize an event payload to a JSON string for Redis transport."""
@@ -64,6 +76,38 @@ def _deserialize_payload(raw: Any) -> Any:
     if isinstance(raw, list) and len(raw) >= 1 and isinstance(raw[0], str):
         return tuple(raw)
     return raw
+
+
+def _maybe_compress(message: str) -> str:
+    """Gzip a replay-buffer entry when enabled and large enough.
+
+    Returns a self-describing string: ``"gz:" + base64(gzip(message))`` when
+    compressed, or the original JSON when not. The Redis client runs with
+    ``decode_responses=True``, so List values must round-trip as ``str`` — the
+    gzip bytes are base64-wrapped rather than stored raw. Only the replay buffer
+    (the stored List) is compressed; the live PUBLISH payload is left untouched,
+    since it is transient and never counts against Redis memory.
+    """
+    if not settings.redis.REDIS_REPLAY_COMPRESSION:
+        return message
+    raw = message.encode("utf-8")
+    if len(raw) < _COMPRESSION_MIN_BYTES:
+        return message
+    return _COMPRESSION_PREFIX + base64.b64encode(gzip.compress(raw)).decode("ascii")
+
+
+def _decompress(raw: str) -> str:
+    """Inverse of :func:`_maybe_compress`.
+
+    Plain JSON passes through untouched, so a reader on this version decodes
+    entries written by either version — the ``gz:`` marker, not the setting,
+    decides. That is what makes enabling compression safe: deploy this code
+    everywhere first (all readers can decode), then flip the write flag.
+    """
+    if not raw.startswith(_COMPRESSION_PREFIX):
+        return raw
+    packed = raw[len(_COMPRESSION_PREFIX) :]
+    return gzip.decompress(base64.b64decode(packed)).decode("utf-8")
 
 
 def _backoff_delay(attempt: int) -> float:
@@ -140,8 +184,9 @@ class RedisRunBroker(BaseRunBroker):
     async def _cache_event(self, message: str) -> None:
         """Append the event to the replay buffer and bump the sequence counter."""
         client = redis_manager.get_client()
+        stored = _maybe_compress(message)
         pipe = client.pipeline()
-        pipe.rpush(self._cache_key, message)
+        pipe.rpush(self._cache_key, stored)
         pipe.ltrim(self._cache_key, -_REPLAY_MAX_EVENTS, -1)
         pipe.expire(self._cache_key, _REPLAY_TTL_SECONDS)
         pipe.incr(self._counter_key)
@@ -252,7 +297,7 @@ class RedisRunBroker(BaseRunBroker):
             client = redis_manager.get_client()
             raw_messages = await client.lrange(self._cache_key, -1, -1)  # type: ignore[invalid-await]
             if raw_messages:
-                data = json.loads(raw_messages[0])
+                data = json.loads(_decompress(raw_messages[0]))
                 payload = _deserialize_payload(data["payload"])
                 if isinstance(payload, tuple) and len(payload) >= 1 and payload[0] == "end":
                     self._finished = True
@@ -277,7 +322,7 @@ class RedisRunBroker(BaseRunBroker):
         found_last = last_event_id is None
         prev_event_id: str | None = None
         for raw in raw_messages:
-            data = json.loads(raw)
+            data = json.loads(_decompress(raw))
             event_id: str = data["event_id"]
 
             # Skip an adjacent duplicate: put() retries are at-least-once, so a

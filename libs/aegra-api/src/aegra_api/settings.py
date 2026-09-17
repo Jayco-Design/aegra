@@ -341,6 +341,14 @@ class RedisSettings(EnvBase):
     REDIS_URL: str = "redis://localhost:6379/0"
     REDIS_CHANNEL_PREFIX: str = "aegra:run:"
     REDIS_MAX_CONNECTIONS: int = 250
+    # Gzip large replay-buffer entries before storing them (see redis_broker).
+    # The replay buffer holds the full stream (values snapshots included), so on
+    # a big graph state it dominates Redis memory; gzip typically shrinks that
+    # JSON several-fold. Off by default so it is a no-op until enabled: readers
+    # always decode both formats (the entry is self-describing), so a rollout
+    # must deploy this code everywhere BEFORE turning the flag on, or an
+    # older instance could read a compressed entry it can't decode.
+    REDIS_REPLAY_COMPRESSION: bool = False
 
 
 class WorkerSettings(EnvBase):
