@@ -163,25 +163,25 @@ class StreamingService:
                 yield sse_event
                 last_sent_sequence = current_sequence
 
-    async def interrupt_run(self, run_id: str) -> bool:
+    async def interrupt_run(self, run_id: str, *, emit_end_event: bool = True) -> bool:
         """Interrupt a running execution.
 
         Delegates to broker_manager for cross-instance support via Redis pub/sub.
         """
         try:
-            await broker_manager.request_cancel(run_id, "interrupt")
+            await broker_manager.request_cancel(run_id, "interrupt", emit_end_event=emit_end_event)
             return True
         except Exception as e:
             logger.error(f"Error interrupting run {run_id}: {e}")
             return False
 
-    async def cancel_run(self, run_id: str) -> bool:
+    async def cancel_run(self, run_id: str, *, emit_end_event: bool = True) -> bool:
         """Cancel a pending or running execution.
 
         Delegates to broker_manager for cross-instance support via Redis pub/sub.
         """
         try:
-            await broker_manager.request_cancel(run_id, "cancel")
+            await broker_manager.request_cancel(run_id, "cancel", emit_end_event=emit_end_event)
             return True
         except Exception as e:
             logger.error(f"Error cancelling run {run_id}: {e}")
@@ -194,6 +194,7 @@ class StreamingService:
 
     async def cleanup_run(self, run_id: str) -> None:
         """Clean up streaming resources for a run."""
+        self.event_counters.pop(run_id, None)
         broker_manager.cleanup_broker(run_id)
 
     async def _convert_raw_to_sse(self, event_id: str, raw_event: Any) -> str | None:

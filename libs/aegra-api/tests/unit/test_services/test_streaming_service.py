@@ -347,7 +347,7 @@ class TestStreamingService:
             success = await service.interrupt_run(run_id)
 
             assert success is True
-            mock_bm.request_cancel.assert_awaited_once_with(run_id, "interrupt")
+            mock_bm.request_cancel.assert_awaited_once_with(run_id, "interrupt", emit_end_event=True)
 
     async def test_cancel_run_delegates_to_broker_manager(self) -> None:
         """Test run cancellation delegates to broker_manager"""
@@ -359,7 +359,7 @@ class TestStreamingService:
             success = await service.cancel_run(run_id)
 
             assert success is True
-            mock_bm.request_cancel.assert_awaited_once_with(run_id, "cancel")
+            mock_bm.request_cancel.assert_awaited_once_with(run_id, "cancel", emit_end_event=True)
 
     async def test_is_run_streaming(self) -> None:
         """Test fetching if run is streaming"""
@@ -387,3 +387,13 @@ class TestStreamingService:
         with patch("aegra_api.services.streaming_service.broker_manager") as mock_manager:
             await service.cleanup_run(run_id)
             mock_manager.cleanup_broker.assert_called_with(run_id)
+
+    async def test_cleanup_run_drops_the_event_counter(self) -> None:
+        """The counter dict is global and unbounded; a finished run must leave no entry."""
+        service = StreamingService()
+        service.event_counters["run-123"] = 7
+
+        with patch("aegra_api.services.streaming_service.broker_manager"):
+            await service.cleanup_run("run-123")
+
+        assert "run-123" not in service.event_counters

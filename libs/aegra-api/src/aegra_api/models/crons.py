@@ -47,7 +47,9 @@ class CronCreate(BaseModel):
 
     assistant_id: str = Field(..., max_length=_STR_FIELD_MAX_LEN)
     schedule: str = Field(..., max_length=_SCHEDULE_MAX_LEN)
-    input: dict[str, Any] | None = None
+    # Required: every firing builds a RunCreate from this payload, and
+    # RunCreate rejects an empty input — fail at the API boundary (#514).
+    input: dict[str, Any]
     metadata: dict[str, Any] | None = None
     config: dict[str, Any] | None = None
     context: dict[str, Any] | None = None
@@ -139,6 +141,7 @@ class CronSearchRequest(BaseModel):
 
     assistant_id: str | None = None
     thread_id: str | None = None
+    metadata: dict[str, Any] | None = None
     enabled: bool | None = None
     limit: int = Field(10, ge=1, le=1000)
     offset: int = Field(0, ge=0)
@@ -151,3 +154,4 @@ class CronCountRequest(BaseModel):
 
     assistant_id: str | None = None
     thread_id: str | None = None
+    metadata: dict[str, Any] | None = None
