@@ -274,6 +274,7 @@ async def _trigger_first_run(
             run_request,
             user,
             initial_status="pending",
+            cron_id=cron.cron_id,
         )
     except Exception:
         if should_delete_thread:

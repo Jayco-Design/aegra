@@ -79,6 +79,7 @@ class TestFinalizeRun:
                 "aegra_api.services.run_status.set_thread_status_if_no_active_runs",
                 new_callable=AsyncMock,
             ) as mock_set_thread,
+            patch("aegra_api.services.run_status.notify_terminal_run", new_callable=AsyncMock) as notify,
         ):
             finalized = await finalize_run(
                 "run-1",
@@ -89,6 +90,7 @@ class TestFinalizeRun:
             )
 
         assert finalized is True
+        notify.assert_awaited_once_with("run-1", reason=None)
         statement = session.execute.await_args.args[0]
         compiled = statement.compile()
         assert "runs.user_id" in str(compiled)

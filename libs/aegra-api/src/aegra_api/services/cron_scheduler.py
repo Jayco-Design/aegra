@@ -199,6 +199,7 @@ class CronScheduler:
                 run_request,
                 user,
                 initial_status="pending",
+                cron_id=cron.cron_id,
             )
             run_created = True
             logger.info("Cron fired run", cron_id=cron.cron_id, run_id=_run_id, thread_id=thread_id)

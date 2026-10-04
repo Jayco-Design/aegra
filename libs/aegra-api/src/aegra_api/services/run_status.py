@@ -18,6 +18,7 @@ from aegra_api.core.orm import Run as RunORM
 from aegra_api.core.orm import Thread as ThreadORM
 from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.serializers import GeneralSerializer
+from aegra_api.services.terminal_runs import TerminalReason, notify_terminal_run
 from aegra_api.utils.status_compat import validate_run_status, validate_thread_status
 
 logger = structlog.getLogger(__name__)
@@ -158,6 +159,7 @@ async def finalize_run(
     thread_status: str,
     output: Any = None,
     error: str | None = None,
+    terminal_reason: TerminalReason | None = None,
 ) -> bool:
     """Conditionally update run and thread status in one transaction.
 
@@ -201,6 +203,7 @@ async def finalize_run(
         )
         await session.commit()
 
+    await notify_terminal_run(run_id, reason=terminal_reason)
     logger.info("Finalized run", run_id=run_id, status=validated_run, thread_status=validated_thread)
     return True
 

@@ -19,6 +19,7 @@ from aegra_api.core.orm import _get_session_maker
 from aegra_api.core.redis_manager import redis_manager
 from aegra_api.observability.metrics import REAPER_RECOVERED_RUNS
 from aegra_api.services.run_status import set_thread_status_if_no_active_runs
+from aegra_api.services.terminal_runs import notify_terminal_run
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
@@ -206,6 +207,8 @@ class LeaseReaper:
                 )
             await session.commit()
 
+        for run_id in exhausted:
+            await notify_terminal_run(run_id, reason="lease_recovery_exhausted")
         return retryable, exhausted
 
     @staticmethod

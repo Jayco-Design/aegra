@@ -38,6 +38,7 @@ from aegra_api.services.run_executor import (
     execute_run,
 )
 from aegra_api.services.run_status import finalize_run
+from aegra_api.services.terminal_runs import notify_terminal_run
 from aegra_api.settings import settings
 
 logger = structlog.getLogger(__name__)
@@ -302,6 +303,7 @@ class WorkerExecutor(BaseExecutor):
                         status="error",
                         thread_status="error",
                         error="Job exceeded maximum execution time",
+                        terminal_reason="execution_timeout",
                     )
                 await _release_lease(run_id, worker_name)
         except asyncio.CancelledError:
@@ -476,6 +478,7 @@ async def _acquire_and_load(run_id: str, worker_name: str) -> _LoadedRun | None:
                 )
             )
             await session.commit()
+            await notify_terminal_run(run_id, reason="execution_error")
             return None
 
         job = RunJob.from_run_orm(run_orm)

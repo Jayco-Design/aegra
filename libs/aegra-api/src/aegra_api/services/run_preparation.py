@@ -208,6 +208,14 @@ def _resolve_checkpoint(request: RunCreate) -> dict[str, Any] | None:
     return {"checkpoint_id": str(request.checkpoint_id), **(request.checkpoint or {})}
 
 
+def _server_run_metadata(metadata: dict[str, Any] | None, cron_id: str | None) -> dict[str, Any]:
+    result = dict(metadata or {})
+    result.pop("aegra_cron_id", None)
+    if cron_id is not None:
+        result["aegra_cron_id"] = cron_id
+    return result
+
+
 async def _prepare_run(
     session: AsyncSession,
     thread_id: str,
@@ -216,6 +224,7 @@ async def _prepare_run(
     *,
     initial_status: str,
     event_streaming_v2: bool = False,
+    cron_id: str | None = None,
 ) -> tuple[str, Run, RunJob]:
     """Shared run-creation logic used by create, stream, and wait endpoints.
 
@@ -273,6 +282,8 @@ async def _prepare_run(
     await set_thread_status(session, thread_id, "busy")
 
     # Build the RunJob before persisting so we can store execution_params
+    run_metadata = _server_run_metadata(request.metadata, cron_id)
+
     job = RunJob(
         identity=RunIdentity(run_id=run_id, thread_id=thread_id, graph_id=assistant.graph_id),
         user=user,
@@ -291,7 +302,7 @@ async def _prepare_run(
             multitask_strategy=request.multitask_strategy,
             subgraphs=request.stream_subgraphs or False,
         ),
-        run_metadata=request.metadata or {},
+        run_metadata=run_metadata,
     )
 
     # Persist run record with trace metadata for worker observability.

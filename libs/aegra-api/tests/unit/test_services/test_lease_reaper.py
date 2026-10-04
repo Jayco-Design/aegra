@@ -79,10 +79,12 @@ class TestRecoverCrashedRuns:
                 "aegra_api.services.lease_reaper.set_thread_status_if_no_active_runs",
                 new_callable=AsyncMock,
             ) as mock_set_thread,
+            patch("aegra_api.services.lease_reaper.notify_terminal_run", new_callable=AsyncMock) as notify,
         ):
             mock_settings.worker.BG_JOB_MAX_RETRIES = 1
             retryable, exhausted = await LeaseReaper._recover_crashed_runs(["run-1", "run-2"])
 
+        notify.assert_awaited_once_with("run-2", reason="lease_recovery_exhausted")
         assert retryable == ["run-1"]
         assert exhausted == ["run-2"]
         for call in session.execute.await_args_list[1:]:

@@ -692,6 +692,7 @@ class TestExecuteAndRelease:
             status="error",
             thread_status="error",
             error="Job exceeded maximum execution time",
+            terminal_reason="execution_timeout",
         )
         mock_release.assert_awaited_once_with(run_id, "worker-0")
         assert timeout_marker_seen is True

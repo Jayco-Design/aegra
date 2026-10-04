@@ -93,6 +93,7 @@ async def execute_run(job: RunJob) -> None:
                 thread_status="error",
                 output={},
                 error=_TIMEOUT_ERROR,
+                terminal_reason="execution_timeout",
             )
             if finalized:
                 await _best_effort_signal(
