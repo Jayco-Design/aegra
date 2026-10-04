@@ -467,18 +467,26 @@ async def _acquire_and_load(run_id: str, worker_name: str) -> _LoadedRun | None:
                 run_id=run_id,
                 worker=worker_name,
             )
-            await session.execute(
+            failed = await session.execute(
                 update(RunORM)
-                .where(RunORM.run_id == run_id, RunORM.claimed_by == worker_name)
+                .where(
+                    RunORM.run_id == run_id,
+                    RunORM.claimed_by == worker_name,
+                    RunORM.status == "running",
+                )
                 .values(
                     claimed_by=None,
                     lease_expires_at=None,
                     status="error",
+                    updated_at=datetime.now(UTC),
                     error_message="Run missing execution_params (data corruption or pre-migration row)",
                 )
+                .returning(RunORM.run_id)
             )
+            changed = failed.scalar_one_or_none() is not None
             await session.commit()
-            await notify_terminal_run(run_id, reason="execution_error")
+            if changed:
+                await notify_terminal_run(run_id, reason="execution_error")
             return None
 
         job = RunJob.from_run_orm(run_orm)

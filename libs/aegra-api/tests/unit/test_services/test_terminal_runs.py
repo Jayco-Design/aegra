@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from aegra_api.services import terminal_runs
+from aegra_api.services import terminal_runs, worker_executor
 from aegra_api.services.run_preparation import _server_run_metadata
 
 
@@ -86,3 +86,28 @@ def test_client_metadata_cannot_claim_an_automation() -> None:
         "aegra_cron_id": "server-cron",
     }
     assert client_metadata["aegra_cron_id"] == "forged"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("won", [True, False])
+async def test_invalid_execution_state_notifies_only_the_winning_writer(
+    monkeypatch: pytest.MonkeyPatch, won: bool
+) -> None:
+    session = AsyncMock()
+    claimed = MagicMock(rowcount=1)
+    failed = MagicMock()
+    failed.scalar_one_or_none.return_value = "run" if won else None
+    session.execute.side_effect = [claimed, failed]
+    session.scalar.return_value = SimpleNamespace(execution_params=None)
+    context = AsyncMock()
+    context.__aenter__.return_value = session
+    monkeypatch.setattr(worker_executor, "_get_session_maker", lambda: MagicMock(return_value=context))
+    notify = AsyncMock()
+    monkeypatch.setattr(worker_executor, "notify_terminal_run", notify)
+
+    assert await worker_executor._acquire_and_load("run", "worker") is None
+
+    if won:
+        notify.assert_awaited_once_with("run", reason="execution_error")
+    else:
+        notify.assert_not_awaited()
