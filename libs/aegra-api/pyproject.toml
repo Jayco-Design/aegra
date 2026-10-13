@@ -29,7 +29,7 @@ dependencies = [
 
     # LangGraph
     "langgraph>=1.0.3",
-    "langgraph-sdk>=0.3.5",
+    "langgraph-sdk>=0.4.4",
     "langgraph-checkpoint-postgres>=3.1.1",
 
     # Database
