@@ -248,3 +248,53 @@ class TestEventsMode:
         assert graph.astream_events_kwargs is not None
         assert graph.astream_events_kwargs["interrupt_before"] == "*"
         assert graph.astream_events_kwargs["interrupt_after"] == "*"
+
+
+class _EventsGraph:
+    """A graph whose astream_events yields the given raw events."""
+
+    def __init__(self, events: list[dict[str, Any]]) -> None:
+        self._events = events
+
+    async def astream_events(
+        self, _input_data: Any, _config: dict[str, Any], **_kwargs: Any
+    ) -> AsyncIterator[dict[str, Any]]:
+        for event in self._events:
+            yield event
+
+
+async def _raw_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    config = {"run_id": "run-123", "metadata": {"run_attempt": 1}}
+    return [
+        payload
+        async for mode, payload in stream_graph_events(_EventsGraph(events), {}, config, stream_mode=["events"])
+        if mode == "events"
+    ]
+
+
+class TestEventInputs:
+    """Chain and chat-model events leave out their input, which repeats the whole state."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["on_chain_start", "on_chain_end", "on_chat_model_start", "on_chat_model_end"])
+    async def test_chain_and_model_events_drop_their_input(self, kind: str) -> None:
+        event = {
+            "event": kind,
+            "name": "node",
+            "run_id": "child",
+            "tags": ["t"],
+            "metadata": {"m": 1},
+            "data": {"input": {"messages": ["x" * 1000]}, "output": {"messages": ["reply"]}},
+        }
+
+        [payload] = await _raw_events([event])
+
+        assert payload == {**event, "data": {"output": {"messages": ["reply"]}}}
+        assert event["data"]["input"] == {"messages": ["x" * 1000]}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["on_tool_start", "on_tool_end", "on_chat_model_stream", "on_custom_event"])
+    async def test_other_events_keep_their_input(self, kind: str) -> None:
+        event = {"event": kind, "name": "tool", "run_id": "child", "data": {"input": {"key": 1}}}
+
+        assert await _raw_events([event]) == [event]
