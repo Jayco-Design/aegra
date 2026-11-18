@@ -36,6 +36,8 @@ _serializer = GeneralSerializer()
 _REPLAY_TTL_SECONDS = REPLAY_RETENTION_SECONDS
 # Max events in the replay buffer (prevents unbounded growth)
 _REPLAY_MAX_EVENTS = 10_000
+# Max bytes per buffered event: the count cap alone doesn't bound the buffer's memory.
+_REPLAY_MAX_EVENT_BYTES = 1024 * 1024
 
 # Reconnect backoff for Redis pub/sub listeners
 _BACKOFF_BASE = 0.5
@@ -114,6 +116,15 @@ class RedisRunBroker(BaseRunBroker):
 
         is_end = isinstance(payload, tuple) and len(payload) >= 1 and payload[0] == "end"
 
+        # Replay finds where to resume by event_id, so an oversized event keeps a placeholder.
+        cached = message
+        if resumable and not is_end and len(message) > _REPLAY_MAX_EVENT_BYTES:
+            logger.warning(
+                f"Event {event_id} for run {self.run_id} is {len(message)} bytes, over the "
+                f"{_REPLAY_MAX_EVENT_BYTES}-byte replay cap: published live, buffered as a placeholder"
+            )
+            cached = json.dumps({"event_id": event_id, "omitted": True})
+
         async with self._write_lock:
             # Cache and publish are retried independently so a publish failure
             # never re-runs the cache pipeline (which would double-write the
@@ -121,7 +132,7 @@ class RedisRunBroker(BaseRunBroker):
             operation = "cache"
             try:
                 if resumable:
-                    await self._write_with_retry(self._cache_event, message)
+                    await self._write_with_retry(self._cache_event, cached)
 
                 operation = "publish"
                 await self._write_with_retry(self._publish_event, message)
@@ -253,7 +264,7 @@ class RedisRunBroker(BaseRunBroker):
             raw_messages = await client.lrange(self._cache_key, -1, -1)  # type: ignore[invalid-await]
             if raw_messages:
                 data = json.loads(raw_messages[0])
-                payload = _deserialize_payload(data["payload"])
+                payload = _deserialize_payload(data.get("payload"))
                 if isinstance(payload, tuple) and len(payload) >= 1 and payload[0] == "end":
                     self._finished = True
                     return True
@@ -288,6 +299,10 @@ class RedisRunBroker(BaseRunBroker):
             if event_id == prev_event_id:
                 continue
             prev_event_id = event_id
+
+            if data.get("omitted"):
+                found_last = found_last or event_id == last_event_id
+                continue
 
             payload = _deserialize_payload(data["payload"])
             all_events.append((event_id, payload))
