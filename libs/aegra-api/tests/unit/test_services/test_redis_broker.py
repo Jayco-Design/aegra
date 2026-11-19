@@ -9,6 +9,7 @@ from redis.exceptions import ConnectionError as RedisConnectionError
 
 from aegra_api.services.redis_broker import (
     _PUT_MAX_ATTEMPTS,
+    _REPLAY_MAX_EVENT_BYTES,
     RedisBrokerManager,
     RedisRunBroker,
     _deserialize_payload,
@@ -120,6 +121,87 @@ class TestRedisRunBroker:
 
             mock_client.publish.assert_called_once()
             mock_client.pipeline.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_put_oversized_event_is_published_and_buffered_as_a_placeholder(self) -> None:
+        broker = self._make_broker()
+        mock_client = MagicMock()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock()
+        mock_client.pipeline.return_value = mock_pipe
+        mock_client.publish = AsyncMock()
+
+        with (
+            patch("aegra_api.services.redis_broker.redis_manager") as mock_rm,
+            patch("aegra_api.services.redis_broker.logger") as mock_logger,
+        ):
+            mock_rm.get_client.return_value = mock_client
+
+            await broker.put("evt-1", ("events", {"data": "x" * _REPLAY_MAX_EVENT_BYTES}))
+
+            [cached] = mock_pipe.rpush.call_args.args[1:]
+            assert json.loads(cached) == {"event_id": "evt-1", "omitted": True}
+            published = mock_client.publish.call_args.args[1]
+            assert len(published) > _REPLAY_MAX_EVENT_BYTES
+            [warning] = mock_logger.warning.call_args.args
+            assert "evt-1" in warning
+            assert broker.run_id in warning
+
+    @pytest.mark.asyncio
+    async def test_put_event_exactly_at_the_size_cap_is_buffered_whole(self) -> None:
+        broker = self._make_broker()
+        mock_client = MagicMock()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock()
+        mock_client.pipeline.return_value = mock_pipe
+        mock_client.publish = AsyncMock()
+        overhead = len(json.dumps({"event_id": "evt-1", "payload": ["events", {"data": ""}]}))
+        payload = ("events", {"data": "x" * (_REPLAY_MAX_EVENT_BYTES - overhead)})
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+
+            await broker.put("evt-1", payload)
+
+            [cached] = mock_pipe.rpush.call_args.args[1:]
+            assert len(cached) == _REPLAY_MAX_EVENT_BYTES
+            assert json.loads(cached)["payload"][0] == "events"
+
+    @pytest.mark.asyncio
+    async def test_put_event_under_the_size_cap_is_cached(self) -> None:
+        broker = self._make_broker()
+        mock_client = MagicMock()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock()
+        mock_client.pipeline.return_value = mock_pipe
+        mock_client.publish = AsyncMock()
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+
+            await broker.put("evt-1", ("events", {"data": "x" * (_REPLAY_MAX_EVENT_BYTES // 2)}))
+
+            [cached] = mock_pipe.rpush.call_args.args[1:]
+            assert json.loads(cached)["payload"][0] == "events"
+            mock_client.publish.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_put_oversized_end_event_is_buffered_whole(self) -> None:
+        broker = self._make_broker()
+        mock_client = MagicMock()
+        mock_pipe = MagicMock()
+        mock_pipe.execute = AsyncMock()
+        mock_client.pipeline.return_value = mock_pipe
+        mock_client.publish = AsyncMock()
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+
+            await broker.put("evt-1", ("end", {"status": "x" * _REPLAY_MAX_EVENT_BYTES}))
+
+            [cached] = mock_pipe.rpush.call_args.args[1:]
+            assert json.loads(cached)["payload"][0] == "end"
+            assert broker.is_finished()
 
     @pytest.mark.asyncio
     async def test_put_end_event_marks_finished(self) -> None:
@@ -432,6 +514,41 @@ class TestRedisRunBroker:
         assert len(events) == 2
         assert events[0] == ("evt-1", ("values", {"a": 1}))
         assert events[1] == ("evt-2", ("values", {"a": 2}))
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("last_event_id", "expected"),
+        [("evt-3", ["evt-4"]), (None, ["evt-1", "evt-2", "evt-4"])],
+    )
+    async def test_replay_resumes_after_a_placeholder_and_never_returns_it(
+        self, last_event_id: str | None, expected: list[str]
+    ) -> None:
+        broker = self._make_broker()
+        mock_client = AsyncMock()
+        mock_client.lrange.return_value = [
+            json.dumps({"event_id": "evt-1", "payload": ["values", {"a": 1}]}),
+            json.dumps({"event_id": "evt-2", "payload": ["values", {"a": 2}]}),
+            json.dumps({"event_id": "evt-3", "omitted": True}),
+            json.dumps({"event_id": "evt-4", "payload": ["values", {"a": 4}]}),
+        ]
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+
+            events = await broker.replay(last_event_id)
+
+        assert [event_id for event_id, _ in events] == expected
+
+    @pytest.mark.asyncio
+    async def test_check_end_in_buffer_is_false_when_a_placeholder_is_last(self) -> None:
+        broker = self._make_broker()
+        mock_client = AsyncMock()
+        mock_client.lrange.return_value = [json.dumps({"event_id": "evt-9", "omitted": True})]
+
+        with patch("aegra_api.services.redis_broker.redis_manager") as mock_rm:
+            mock_rm.get_client.return_value = mock_client
+
+            assert await broker._check_end_in_buffer() is False
 
     @pytest.mark.asyncio
     async def test_replay_returns_events_after_last_event_id(self) -> None:
