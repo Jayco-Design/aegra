@@ -369,7 +369,38 @@ class TestRawStreamCopies:
     async def test_debug_and_updates_copies_go_out_only_when_requested(self) -> None:
         assert await _raw_root_modes(["events", "values"]) == ["values", "custom"]
         assert await _raw_root_modes(["events", "values", "updates"]) == ["values", "updates", "custom"]
+        # Only modes aegra adds itself are filtered; LangGraph sends no values/custom chunks unless asked.
         assert await _raw_root_modes(["events", "debug", "updates"]) == ["values", "updates", "debug", "custom"]
+
+    @pytest.mark.asyncio
+    async def test_an_interrupt_in_unrequested_updates_still_arrives_as_values(self) -> None:
+        interrupt = {"__interrupt__": [{"value": "approve?"}]}
+        event = {"event": "on_chain_stream", "run_id": "run-123", "data": {"chunk": ("updates", interrupt)}}
+        config = {"configurable": {"run_id": "run-123"}, "metadata": {"run_attempt": 1}}
+
+        streamed = [
+            item async for item in stream_graph_events(_EventsGraph([event]), {}, config, stream_mode=["events"])
+        ]
+
+        assert streamed[1:] == [("values", interrupt)]
+
+    @pytest.mark.asyncio
+    async def test_subgraph_chunks_follow_the_same_rule(self) -> None:
+        events = [
+            {"event": "on_chain_stream", "run_id": "run-123", "data": {"chunk": (("sub:1",), m, {"m": m})}}
+            for m in ("debug", "updates", "values")
+        ]
+        config = {"configurable": {"run_id": "run-123"}, "metadata": {"run_attempt": 1}}
+
+        raw = [
+            payload["data"]["chunk"][1]
+            async for mode, payload in stream_graph_events(
+                _EventsGraph(events), {}, config, stream_mode=["events", "values"], subgraphs=True
+            )
+            if mode == "events"
+        ]
+
+        assert raw == ["values"]
 
     @pytest.mark.asyncio
     async def test_a_real_graph_streams_no_unrequested_root_copies(self) -> None:
