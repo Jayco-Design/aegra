@@ -191,6 +191,9 @@ async def stream_graph_events(
     # Track whether to filter non-interrupt updates
     only_interrupt_updates = not updates_explicitly_requested
 
+    # Modes added above for aegra's own use; the client never asked for their chunks.
+    unrequested_modes = {"debug", "updates"} - set(stream_mode)
+
     # Apply context schema filtering if available
     if context and not is_js_graph:
         try:
@@ -289,7 +292,7 @@ async def stream_graph_events(
 
                     # Also yield as raw "events" event if "events" mode requested
                     # This ensures on_chain_stream events are available as raw events
-                    if "events" in stream_mode:
+                    if "events" in stream_mode and mode not in unrequested_modes:
                         yield "events", _without_input(event)
 
                 # Pass through raw events if "events" mode requested
