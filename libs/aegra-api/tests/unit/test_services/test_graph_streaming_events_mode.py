@@ -4,6 +4,7 @@ Tests for issue #99: stream_mode="events" does not work
 https://github.com/aegra/aegra/issues/99
 """
 
+import uuid
 from collections.abc import AsyncIterator
 from typing import Any
 from unittest.mock import MagicMock
@@ -345,3 +346,83 @@ class TestEventInputs:
             assert all("input" not in (e.get("data") or {}) for e in by_kind[kind]), kind
         assert any("output" in e["data"] for e in by_kind["on_chat_model_end"])
         assert all(e["data"]["input"] == {"key": "k"} for e in by_kind["on_tool_start"])
+
+
+def _root_chunk(mode: str) -> dict[str, Any]:
+    return {"event": "on_chain_stream", "name": "graph", "run_id": "run-123", "data": {"chunk": (mode, {"m": mode})}}
+
+
+async def _raw_root_modes(stream_mode: list[str]) -> list[str]:
+    config = {"configurable": {"run_id": "run-123"}, "metadata": {"run_attempt": 1}}
+    graph = _EventsGraph([_root_chunk(m) for m in ("values", "updates", "debug", "custom")])
+    return [
+        payload["data"]["chunk"][0]
+        async for mode, payload in stream_graph_events(graph, {}, config, stream_mode=stream_mode)
+        if mode == "events"
+    ]
+
+
+class TestRawStreamCopies:
+    """The raw copy of a root stream chunk only goes out for a mode the client asked for."""
+
+    @pytest.mark.asyncio
+    async def test_debug_and_updates_copies_go_out_only_when_requested(self) -> None:
+        assert await _raw_root_modes(["events", "values"]) == ["values", "custom"]
+        assert await _raw_root_modes(["events", "values", "updates"]) == ["values", "updates", "custom"]
+        # Only modes aegra adds itself are filtered; LangGraph sends no values/custom chunks unless asked.
+        assert await _raw_root_modes(["events", "debug", "updates"]) == ["values", "updates", "debug", "custom"]
+
+    @pytest.mark.asyncio
+    async def test_an_interrupt_in_unrequested_updates_still_arrives_as_values(self) -> None:
+        interrupt = {"__interrupt__": [{"value": "approve?"}]}
+        event = {"event": "on_chain_stream", "run_id": "run-123", "data": {"chunk": ("updates", interrupt)}}
+        config = {"configurable": {"run_id": "run-123"}, "metadata": {"run_attempt": 1}}
+
+        streamed = [
+            item async for item in stream_graph_events(_EventsGraph([event]), {}, config, stream_mode=["events"])
+        ]
+
+        assert streamed[1:] == [("values", interrupt)]
+
+    @pytest.mark.asyncio
+    async def test_subgraph_chunks_follow_the_same_rule(self) -> None:
+        events = [
+            {"event": "on_chain_stream", "run_id": "run-123", "data": {"chunk": (("sub:1",), m, {"m": m})}}
+            for m in ("debug", "updates", "values")
+        ]
+        config = {"configurable": {"run_id": "run-123"}, "metadata": {"run_attempt": 1}}
+
+        raw = [
+            payload["data"]["chunk"][1]
+            async for mode, payload in stream_graph_events(
+                _EventsGraph(events), {}, config, stream_mode=["events", "values"], subgraphs=True
+            )
+            if mode == "events"
+        ]
+
+        assert raw == ["values"]
+
+    @pytest.mark.asyncio
+    async def test_a_real_graph_streams_no_unrequested_root_copies(self) -> None:
+        model = GenericFakeChatModel(messages=iter([AIMessage("done")]))
+
+        async def agent(state: MessagesState) -> dict[str, Any]:
+            return {"messages": [await model.ainvoke(state["messages"])]}
+
+        graph = StateGraph(MessagesState).add_node("agent", agent).add_edge(START, "agent").compile()
+        run_id = str(uuid.uuid4())
+        config = {"run_id": run_id, "configurable": {"run_id": run_id}, "metadata": {"run_attempt": 1}}
+        streamed = [
+            (mode, payload)
+            async for mode, payload in stream_graph_events(
+                graph, {"messages": [("user", "hi")]}, config, stream_mode=["events", "values"]
+            )
+        ]
+
+        root_copies = [
+            p["data"]["chunk"][0]
+            for mode, p in streamed
+            if mode == "events" and p["event"] == "on_chain_stream" and p["run_id"] == run_id
+        ]
+        assert root_copies and set(root_copies) == {"values"}
+        assert any(mode == "values" for mode, _ in streamed)
