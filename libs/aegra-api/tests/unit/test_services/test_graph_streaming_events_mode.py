@@ -9,6 +9,10 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
+from langchain_core.language_models.fake_chat_models import GenericFakeChatModel
+from langchain_core.messages import AIMessage
+from langchain_core.tools import tool
+from langgraph.graph import START, MessagesState, StateGraph
 
 from aegra_api.services.graph_streaming import stream_graph_events
 
@@ -248,3 +252,96 @@ class TestEventsMode:
         assert graph.astream_events_kwargs is not None
         assert graph.astream_events_kwargs["interrupt_before"] == "*"
         assert graph.astream_events_kwargs["interrupt_after"] == "*"
+
+
+class _EventsGraph:
+    """A graph whose astream_events yields the given raw events."""
+
+    def __init__(self, events: list[dict[str, Any]]) -> None:
+        self._events = events
+
+    async def astream_events(
+        self, _input_data: Any, _config: dict[str, Any], **_kwargs: Any
+    ) -> AsyncIterator[dict[str, Any]]:
+        for event in self._events:
+            yield event
+
+
+async def _raw_events(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    config = {"run_id": "run-123", "metadata": {"run_attempt": 1}}
+    return [
+        payload
+        async for mode, payload in stream_graph_events(_EventsGraph(events), {}, config, stream_mode=["events"])
+        if mode == "events"
+    ]
+
+
+class TestEventInputs:
+    """Chain and chat-model events leave out their input, which repeats the whole state."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["on_chain_start", "on_chain_end", "on_chat_model_start", "on_chat_model_end"])
+    async def test_chain_and_model_events_drop_their_input(self, kind: str) -> None:
+        event = {
+            "event": kind,
+            "name": "node",
+            "run_id": "child",
+            "tags": ["t"],
+            "metadata": {"m": 1},
+            "data": {"input": {"messages": ["x" * 1000]}, "output": {"messages": ["reply"]}},
+        }
+
+        [payload] = await _raw_events([event])
+
+        assert payload == {**event, "data": {"output": {"messages": ["reply"]}}}
+        assert event["data"]["input"] == {"messages": ["x" * 1000]}
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("kind", ["on_tool_start", "on_tool_end", "on_chat_model_stream", "on_custom_event"])
+    async def test_other_events_keep_their_input(self, kind: str) -> None:
+        event = {"event": kind, "name": "tool", "run_id": "child", "data": {"input": {"key": 1}}}
+
+        assert await _raw_events([event]) == [event]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("data", [None, "text", {}, {"output": "o"}])
+    async def test_events_without_a_dict_input_pass_through(self, data: Any) -> None:
+        event = {"event": "on_chain_end", "name": "node", "run_id": "child", "data": data}
+
+        assert await _raw_events([event]) == [event]
+
+    @pytest.mark.asyncio
+    async def test_event_without_data_passes_through(self) -> None:
+        event = {"event": "on_chain_start", "name": "node", "run_id": "child"}
+
+        assert await _raw_events([event]) == [event]
+
+    @pytest.mark.asyncio
+    async def test_a_real_graph_streams_no_chain_or_model_input(self) -> None:
+        model = GenericFakeChatModel(messages=iter([AIMessage("done")]))
+
+        @tool
+        def lookup(key: str) -> str:
+            """Look a key up."""
+            return f"value of {key}"
+
+        async def agent(state: MessagesState) -> dict[str, Any]:
+            await lookup.ainvoke({"key": "k"})
+            return {"messages": [await model.ainvoke(state["messages"])]}
+
+        graph = StateGraph(MessagesState).add_node("agent", agent).add_edge(START, "agent").compile()
+        config = {"run_id": "run-123", "metadata": {"run_attempt": 1}}
+        events = [
+            payload
+            async for mode, payload in stream_graph_events(
+                graph, {"messages": [("user", "x" * 1000)]}, config, stream_mode=["events"]
+            )
+            if mode == "events"
+        ]
+
+        by_kind = {kind: [e for e in events if e["event"] == kind] for kind in {e["event"] for e in events}}
+        for kind in ("on_chain_start", "on_chain_end", "on_chat_model_start", "on_chat_model_end"):
+            assert by_kind.get(kind), f"the graph emitted no {kind}"
+            assert all("input" not in (e.get("data") or {}) for e in by_kind[kind]), kind
+        assert any("output" in e["data"] for e in by_kind["on_chat_model_end"])
+        assert all(e["data"]["input"] == {"key": "k"} for e in by_kind["on_tool_start"])

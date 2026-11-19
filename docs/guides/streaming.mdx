@@ -41,7 +41,7 @@ Control what data you receive by setting `stream_mode` on the run. You can pass 
 | `messages` | LLM tokens and tool calls as `(message, metadata)` tuples with accumulation into `messages/partial` and `messages/complete` events |
 | `messages-tuple` | Raw message tuples without accumulation (JavaScript graph compatibility) |
 | `custom` | User-defined data emitted from inside nodes via `get_stream_writer()` |
-| `events` | Low-level LangGraph `astream_events` for fine-grained tracing |
+| `events` | Low-level LangGraph `astream_events` for fine-grained tracing. Chain and chat-model start/end events leave out `data.input` (the run's whole state, repeated for every node); tool events keep theirs |
 | `debug` | Checkpoint and task result events (auto-enabled on all streams) |
 
 <Note>

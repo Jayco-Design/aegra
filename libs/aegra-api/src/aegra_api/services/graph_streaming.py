@@ -95,6 +95,18 @@ def _normalize_checkpoint_task(task: dict[str, Any]) -> dict[str, Any]:
     return task
 
 
+# Each node's start/end event carries its input: the run's whole state, once per node per step.
+_INPUT_FREE_EVENTS = frozenset({"on_chain_start", "on_chain_end", "on_chat_model_start", "on_chat_model_end"})
+
+
+def _without_input(event: dict[str, Any]) -> dict[str, Any]:
+    """The raw event minus `data.input` for chain and chat-model events; tool events keep theirs."""
+    data = event.get("data")
+    if event.get("event") not in _INPUT_FREE_EVENTS or not isinstance(data, dict) or "input" not in data:
+        return event
+    return {**event, "data": {k: v for k, v in data.items() if k != "input"}}
+
+
 def _normalize_checkpoint_payload(
     payload: CheckpointPayload | None,
 ) -> dict[str, Any] | None:
@@ -278,11 +290,11 @@ async def stream_graph_events(
                     # Also yield as raw "events" event if "events" mode requested
                     # This ensures on_chain_stream events are available as raw events
                     if "events" in stream_mode:
-                        yield "events", event
+                        yield "events", _without_input(event)
 
                 # Pass through raw events if "events" mode requested
                 elif "events" in stream_mode:
-                    yield "events", event
+                    yield "events", _without_input(event)
 
     else:
         # Use astream for standard streaming
